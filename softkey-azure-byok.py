@@ -21,7 +21,7 @@ class SoftKEYAzureByok(object):
 	def setup(self, args):
 		self.azure_kek_id = args["kid"]
 		self.target_key_size = args["key_size"]
-		self.target_byok_file_name = args["out"]
+		self.target_byok_file_name = args["out_byok"]
 		self.wrapping_key_file_name =	args["kek_in"]
 
 		self.clean()
@@ -90,7 +90,7 @@ def main():
 	parser = argparse.ArgumentParser(description="SoftKEY Azure BYOK tool for importing protected keys to Azure Key Vault")
 	parser.add_argument("--kid", help="Azure KEK Identifier (Full URL)", required=True)
 	parser.add_argument("--key-size", help="RSA key size 2048, 3072, 4096", required=True)
-	parser.add_argument("--out", help="BYOK File (File name full path)", required=True)
+	parser.add_argument("--out-byok", help="BYOK File (File name full path)", required=True)
 	parser.add_argument("--kek-in", help="Azure KEK for BYOK (File name full path)", required=True)
 	args = parser.parse_args()
 	soft_key_azure_byok.setup(vars(args))
