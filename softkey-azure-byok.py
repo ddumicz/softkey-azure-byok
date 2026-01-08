@@ -1,12 +1,13 @@
 
 import json
 import base64
-import subprocess 
+import subprocess
 import argparse
 import os
+import sys
 
 SCHEMA_VERSION = "1.0.0"
-OPENSSL_V110 = "~/local/bin/openssl.sh"
+OPENSSL_V110 = os.getenv("OPENSSL_PATH", "openssl")
 
 OUT_DIR = "./artifacts"
 PRIVATE_KEY_PATH = "{}/private_key.pem".format(OUT_DIR)
@@ -24,6 +25,15 @@ class SoftKEYAzureByok(object):
 		self.target_byok_file_name = args["out_byok"]
 		self.wrapping_key_file_name =	args["kek_in"]
 
+		# Validate key size
+		valid_key_sizes = ["2048", "3072", "4096"]
+		if self.target_key_size not in valid_key_sizes:
+			raise ValueError(f"Invalid key size: {self.target_key_size}. Must be one of {', '.join(valid_key_sizes)}")
+
+		# Validate KEK file exists
+		if not os.path.isfile(self.wrapping_key_file_name):
+			raise FileNotFoundError(f"KEK file not found: {self.wrapping_key_file_name}")
+
 		self.clean()
 		_dir = "{}".format(OUT_DIR)
 		try:
@@ -33,8 +43,9 @@ class SoftKEYAzureByok(object):
 
 	def clean(self):
 		_dir = "{}".format(OUT_DIR)
-		cmd = "rm -rf " + _dir
-		subprocess.check_output(cmd, shell = True)
+		if os.path.exists(_dir):
+			import shutil
+			shutil.rmtree(_dir)
 	 
 	def generate_byok_file(self):
 		# JSON header
@@ -53,49 +64,62 @@ class SoftKEYAzureByok(object):
 			"schema_version": SCHEMA_VERSION,
 			"header": header,
 			"ciphertext": base64.urlsafe_b64encode(wrapped_wrapping_key + wrapped_target_key).decode(),
-      "generator": "SoftKEY BYOK Tool"
+			"generator": "SoftKEY BYOK Tool"
 		}
 
-		with open(self.target_byok_file_name.format(OUT_DIR), 'w') as f:
+		with open(self.target_byok_file_name, 'w') as f:
 			json.dump(byok, f, indent=2)
 			
 
 	def do_byok(self):
 
 		# Generate a private key.
-		cmd = OPENSSL_V110 + " genrsa -out " + PRIVATE_KEY_PATH + " " + self.target_key_size
-		subprocess.check_output(cmd, shell = True)
+		subprocess.check_output([OPENSSL_V110, "genrsa", "-out", PRIVATE_KEY_PATH, self.target_key_size])
 
 		# Convert the private key to PKCS8 DER format.
-		cmd =  OPENSSL_V110 + " pkcs8 -topk8 -nocrypt -inform PEM -outform DER -in " +  PRIVATE_KEY_PATH + " -out " + TARGET_KEY_PATH
-		subprocess.check_output(cmd, shell = True)
+		subprocess.check_output([OPENSSL_V110, "pkcs8", "-topk8", "-nocrypt", "-inform", "PEM", "-outform", "DER", "-in", PRIVATE_KEY_PATH, "-out", TARGET_KEY_PATH])
 
 		# Generate a temporary AES key.
-		cmd = OPENSSL_V110 + " rand -out " + TEMP_AES_KEY_PATH + " 32"
-		subprocess.check_output(cmd, shell = True)
+		subprocess.check_output([OPENSSL_V110, "rand", "-out", TEMP_AES_KEY_PATH, "32"])
 
 		# Wrap the temporary AES key by using RSA-OAEP with SHA-256.
-		cmd = OPENSSL_V110 + " pkeyutl -encrypt -in " + TEMP_AES_KEY_PATH + " -inkey " + self.wrapping_key_file_name + " -pubin -out " + WRAPPED_TEMP_AES_KEY + " -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha1"
-		subprocess.check_output(cmd, shell = True)
+		subprocess.check_output([OPENSSL_V110, "pkeyutl", "-encrypt", "-in", TEMP_AES_KEY_PATH, "-inkey", self.wrapping_key_file_name, "-pubin", "-out", WRAPPED_TEMP_AES_KEY, "-pkeyopt", "rsa_padding_mode:oaep", "-pkeyopt", "rsa_oaep_md:sha1"])
 
 		# Wrap the target RSA key.
-		cmd = "(hexdump -v -e '/1 \"%02x\"' < " + TEMP_AES_KEY_PATH + ")"
-		temp_aes_key_hexdump = subprocess.check_output(cmd, shell = True)
-		cmd = OPENSSL_V110 + " enc -id-aes256-wrap-pad -iv A65959A6 -K " + temp_aes_key_hexdump.decode('ascii') + " -in " + TARGET_KEY_PATH + " -out " + WRAPPED_TARGET_KEY_PATH
-		subprocess.check_output(cmd, shell = True)
+		with open(TEMP_AES_KEY_PATH, 'rb') as f:
+			temp_aes_key_bytes = f.read()
+		temp_aes_key_hex = temp_aes_key_bytes.hex()
+		subprocess.check_output([OPENSSL_V110, "enc", "-id-aes256-wrap-pad", "-iv", "A65959A6", "-K", temp_aes_key_hex, "-in", TARGET_KEY_PATH, "-out", WRAPPED_TARGET_KEY_PATH])
 
 
 def main():
-	soft_key_azure_byok = SoftKEYAzureByok()
-	parser = argparse.ArgumentParser(description="SoftKEY Azure BYOK tool for importing protected keys to Azure Key Vault")
-	parser.add_argument("--kid", help="Azure KEK Identifier (Full URL)", required=True)
-	parser.add_argument("--key-size", help="RSA key size 2048, 3072, 4096", required=True)
-	parser.add_argument("--out-byok", help="BYOK File (File name full path)", required=True)
-	parser.add_argument("--kek-in", help="Azure KEK for BYOK (File name full path)", required=True)
-	args = parser.parse_args()
-	soft_key_azure_byok.setup(vars(args))
-	soft_key_azure_byok.do_byok()
-	soft_key_azure_byok.generate_byok_file()
+	try:
+		soft_key_azure_byok = SoftKEYAzureByok()
+		parser = argparse.ArgumentParser(description="SoftKEY Azure BYOK tool for importing protected keys to Azure Key Vault")
+		parser.add_argument("--kid", help="Azure KEK Identifier (Full URL)", required=True)
+		parser.add_argument("--key-size", help="RSA key size 2048, 3072, 4096", required=True)
+		parser.add_argument("--out-byok", help="BYOK File (File name full path)", required=True)
+		parser.add_argument("--kek-in", help="Azure KEK for BYOK (File name full path)", required=True)
+		args = parser.parse_args()
+		soft_key_azure_byok.setup(vars(args))
+		soft_key_azure_byok.do_byok()
+		soft_key_azure_byok.generate_byok_file()
+		print(f"Successfully generated BYOK file: {args.out_byok}")
+	except FileNotFoundError as e:
+		print(f"Error: {e}", file=sys.stderr)
+		sys.exit(1)
+	except ValueError as e:
+		print(f"Error: {e}", file=sys.stderr)
+		sys.exit(1)
+	except subprocess.CalledProcessError as e:
+		print(f"Error executing command: {e.cmd}", file=sys.stderr)
+		print(f"Return code: {e.returncode}", file=sys.stderr)
+		if e.output:
+			print(f"Output: {e.output.decode()}", file=sys.stderr)
+		sys.exit(1)
+	except Exception as e:
+		print(f"Unexpected error: {e}", file=sys.stderr)
+		sys.exit(1)
 
 if __name__ == '__main__':
 	main()
